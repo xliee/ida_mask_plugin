@@ -15,6 +15,97 @@ import ida_search
 import ida_segment
 
 
+class PatternSearchResults(ida_kernwin.Choose):
+    """Custom chooser to display pattern search results"""
+    
+    def __init__(self, title, results, pattern_hex, mask_hex):
+        ida_kernwin.Choose.__init__(
+            self,
+            title,
+            [
+                ["Address", 10 | ida_kernwin.Choose.CHCOL_HEX],
+                ["Segment", 10],
+                ["Function", 20], 
+                ["Bytes", 20],
+                ["Offset", 10]
+            ]
+        )
+        
+        self.results = results
+        self.pattern_hex = pattern_hex
+        self.mask_hex = mask_hex
+        self.items = []
+        self.icon = -1
+        self.populate_items()
+    
+    def populate_items(self):
+        """Populate the chooser with result items"""
+        self.items = []
+        
+        for addr in self.results:
+            # Get segment name
+            seg = ida_segment.getseg(addr)
+            seg_name = ida_segment.get_segm_name(seg) if seg else "???"
+            
+            # Get function info
+            func = ida_funcs.get_func(addr)
+            if func:
+                func_name = ida_funcs.get_func_name(func.start_ea)
+                offset = addr - func.start_ea
+                func_info = "%s+0x%X" % (func_name, offset)
+            else:
+                func_info = "-"
+            
+            # Get bytes at address
+            pattern_len = len(self.pattern_hex) // 2
+            actual_bytes = ida_bytes.get_bytes(addr, pattern_len)
+            if actual_bytes:
+                bytes_str = actual_bytes.hex().upper()
+            else:
+                bytes_str = "???"
+            
+            # Format offset from segment start
+            if seg:
+                seg_offset = "0x%X" % (addr - seg.start_ea)
+            else:
+                seg_offset = "-"
+            
+            self.items.append([
+                "0x%08X" % addr,
+                seg_name,
+                func_info,
+                bytes_str,
+                seg_offset
+            ])
+    
+    def get_size(self):
+        """Return number of items"""
+        return len(self.items)
+    
+    def get_line_attr(self, n):
+        """Get line attributes"""
+        return [0, 0]
+    
+    def get_line(self, n):
+        """Get a line"""
+        if n < len(self.items):
+            return self.items[n]
+        return []
+    
+    def OnSelectLine(self, n):
+        """Handle line selection - jump to address"""
+        if n < len(self.results):
+            ida_kernwin.jumpto(self.results[n])
+    
+    def OnGetLine(self, n):
+        """Get line for display"""
+        return self.get_line(n)
+    
+    def OnGetSize(self):
+        """Get size for display"""
+        return self.get_size()
+
+
 class IDAMaskPlugin(ida_idaapi.plugin_t):
     """Main plugin class for IDA Mask Plugin"""
     
@@ -252,13 +343,14 @@ def verify_masked_match(address, pattern_bytes, mask_bytes):
 
 def display_search_results(results, pattern_hex, mask_hex):
     """
-    Display search results in a formatted way
+    Display search results in both console and a results view
     
     Args:
         results: List of addresses where pattern was found
         pattern_hex: Original pattern hex string
         mask_hex: Original mask hex string
     """
+    # Display in console
     ida_kernwin.msg("\n" + "="*60 + "\n")
     ida_kernwin.msg("SEARCH RESULTS\n")
     ida_kernwin.msg("Pattern: %s\n" % pattern_hex)
@@ -291,6 +383,15 @@ def display_search_results(results, pattern_hex, mask_hex):
                        (i, addr, seg_name, func_name, actual_hex))
     
     ida_kernwin.msg("="*60 + "\n")
+    
+    # Show results in a dedicated chooser window
+    if results:
+        title = "Pattern Search Results - %s:%s" % (pattern_hex[:16], mask_hex[:16])
+        if len(pattern_hex) > 16:
+            title += "..."
+        
+        chooser = PatternSearchResults(title, results, pattern_hex, mask_hex)
+        chooser.Show()
 
 
 def create_pattern_from_asm(asm_text):
