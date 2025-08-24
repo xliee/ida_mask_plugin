@@ -13,6 +13,7 @@ import ida_funcs
 import ida_bytes
 import ida_search
 import ida_segment
+import idaapi
 
 
 class PatternSearchResults(ida_kernwin.Choose):
@@ -106,6 +107,84 @@ class PatternSearchResults(ida_kernwin.Choose):
         return self.get_size()
 
 
+class PatternGenerationResults(idaapi.simplecustviewer_t):
+    """Custom viewer to display pattern generation results"""
+    
+    def __init__(self):
+        idaapi.simplecustviewer_t.__init__(self)
+        self.title = "Pattern Generation Results"
+    
+    @staticmethod
+    def show_results(instruction_results, combined_pattern, combined_mask):
+        """Show pattern generation results in a custom viewer"""
+        
+        # Create viewer instance
+        viewer = PatternGenerationResults()
+        
+        # Check if widget already exists
+        if ida_kernwin.find_widget(viewer.title) is not None:
+            ida_kernwin.close_widget(ida_kernwin.find_widget(viewer.title), 0)
+        
+        # Create the viewer
+        if not viewer.Create(viewer.title):
+            print("Unable to create pattern results viewer")
+            return False
+        
+        # Clear any existing content
+        viewer.ClearLines()
+        
+        # Add content
+        viewer.AddLine("=" * 80)
+        viewer.AddLine("PATTERN GENERATION RESULTS")
+        viewer.AddLine("=" * 80)
+        viewer.AddLine("")
+        
+        # Summary
+        success_count = sum(1 for r in instruction_results if r['success'])
+        total_count = len(instruction_results)
+        viewer.AddLine("Summary: %d/%d instructions processed successfully" % (success_count, total_count))
+        viewer.AddLine("")
+        
+        # Individual instruction results
+        viewer.AddLine("INDIVIDUAL INSTRUCTIONS:")
+        viewer.AddLine("-" * 80)
+        
+        for result in instruction_results:
+            status = "SUCCESS" if result['success'] else "FAILED"
+            viewer.AddLine("%2d. [%s] %s" % (result['index'], status, result['instruction']))
+            
+            if result['success']:
+                viewer.AddLine("    Pattern: %s" % result['pattern'])
+                viewer.AddLine("    Mask   : %s" % result['mask'])
+                viewer.AddLine("    P:M    : %s:%s" % (result['pattern'], result['mask']))
+            else:
+                viewer.AddLine("    Error  : %s" % result['error'])
+            viewer.AddLine("")
+        
+        # Combined result
+        if success_count > 0:
+            viewer.AddLine("=" * 80)
+            viewer.AddLine("COMBINED RESULT:")
+            viewer.AddLine("=" * 80)
+            viewer.AddLine("")
+            viewer.AddLine("Combined Pattern: %s" % combined_pattern)
+            viewer.AddLine("Combined Mask   : %s" % combined_mask)
+            viewer.AddLine("")
+            viewer.AddLine("FINAL PATTERN:MASK:")
+            viewer.AddLine("%s:%s" % (combined_pattern, combined_mask))
+            viewer.AddLine("")
+            viewer.AddLine("Pattern Length: %d bytes" % (len(combined_pattern) // 2))
+            viewer.AddLine("")
+        
+        # Show the viewer
+        viewer.Show()
+        
+        # Jump to top
+        viewer.Jump(0, 0)
+        
+        return True
+
+
 class IDAMaskPlugin(ida_idaapi.plugin_t):
     """Main plugin class for IDA Mask Plugin"""
     
@@ -138,7 +217,6 @@ class IDAMaskPlugin(ida_idaapi.plugin_t):
         """Run the plugin - called when plugin is executed directly"""
         ida_kernwin.msg("[ida_mask_plugin] Plugin run() called with arg: %d\n" % arg)
         
-        # Example: List all functions (similar to the C++ example)
         self.list_functions()
         return True
 
@@ -402,21 +480,120 @@ def create_pattern_from_asm(asm_text):
         asm_text: Assembly code as string
     """
     ida_kernwin.msg("[ida_mask_plugin] create_pattern_from_asm called with %d bytes\n" % len(asm_text))
+
+    # Try to import the Python wrapper for the Rust library
+    try:
+        import arm64_mask_gen_py
+    except Exception as e:
+        ida_kernwin.warning("arm64_mask_gen_py not available: %s" % e)
+        ida_kernwin.msg("Assembly input (mock):\n%s\n" % asm_text)
+        ida_kernwin.info("Pattern generation from assembly not available; build and install the Python extension first.")
+        return False
+
+    # Split assembly text into individual instructions
+    instructions = []
+    for line in asm_text.strip().split('\n'):
+        line = line.strip()
+        if line and not line.startswith(';') and not line.startswith('#'):
+            instructions.append(line)
     
-    # Mock implementation - just print the input
-    ida_kernwin.msg("[ida_mask_plugin] Assembly input:\n%s\n" % asm_text)
+    if not instructions:
+        ida_kernwin.warning("No valid instructions found in input")
+        return False
     
-    # TODO: Implement actual assembly parsing and pattern generation
-    # This would involve:
-    # 1. Parsing the assembly text
-    # 2. Converting to machine code bytes
-    # 3. Generating appropriate mask for variable parts (addresses, offsets, etc.)
-    # 4. Returning pattern:mask string
+    ida_kernwin.msg("[ida_mask_plugin] Processing %d instructions...\n" % len(instructions))
     
-    ida_kernwin.info("Pattern generation from assembly is not yet implemented.\nInput received:\n%s" % asm_text)
+    # Process each instruction individually
+    instruction_results = []
+    successful_patterns = []
+    successful_masks = []
+    failed_instructions = []
+    
+    for i, instruction in enumerate(instructions, 1):
+        ida_kernwin.msg("[ida_mask_plugin] Processing instruction %d: %s\n" % (i, instruction))
+        
+        result = {
+            'index': i,
+            'instruction': instruction,
+            'success': False,
+            'pattern': '',
+            'mask': '',
+            'error': ''
+        }
+        
+        try:
+            # Generate pattern for single instruction
+            pat, msk = arm64_mask_gen_py.make_r2_mask(instruction)
+            
+            # Validate the result
+            if pat and msk and len(pat) == len(msk):
+                result['success'] = True
+                result['pattern'] = pat
+                result['mask'] = msk
+                
+                successful_patterns.append(pat)
+                successful_masks.append(msk)
+                ida_kernwin.msg("[ida_mask_plugin]   ✓ Pattern: %s\n" % pat)
+                ida_kernwin.msg("[ida_mask_plugin]   ✓ Mask   : %s\n" % msk)
+            else:
+                result['error'] = "Invalid pattern/mask generated"
+                failed_instructions.append((i, instruction, "Invalid pattern/mask generated"))
+                ida_kernwin.msg("[ida_mask_plugin]   ✗ Failed: Invalid pattern/mask\n")
+                
+        except Exception as e:
+            result['error'] = str(e)
+            failed_instructions.append((i, instruction, str(e)))
+            ida_kernwin.msg("[ida_mask_plugin]   ✗ Failed: %s\n" % str(e))
+        
+        instruction_results.append(result)
+    
+    # Report results
+    ida_kernwin.msg("\n" + "="*60 + "\n")
+    ida_kernwin.msg("PATTERN GENERATION RESULTS\n")
+    ida_kernwin.msg("="*60 + "\n")
+    ida_kernwin.msg("Successful: %d/%d instructions\n" % (len(successful_patterns), len(instructions)))
+    
+    if failed_instructions:
+        ida_kernwin.msg("Failed instructions:\n")
+        for idx, instr, error in failed_instructions:
+            ida_kernwin.msg("  %d. %s - %s\n" % (idx, instr, error))
+        ida_kernwin.msg("\n")
+    
+    if not successful_patterns:
+        ida_kernwin.warning("No instructions could be processed successfully")
+        return False
+    
+    # Combine all successful patterns into a general pattern:mask
+    combined_pattern = ''.join(successful_patterns)
+    combined_mask = ''.join(successful_masks)
+    
+    ida_kernwin.msg("COMBINED PATTERN:MASK\n")
+    ida_kernwin.msg("-"*60 + "\n")
+    ida_kernwin.msg("Pattern: %s\n" % combined_pattern)
+    ida_kernwin.msg("Mask   : %s\n" % combined_mask)
+    ida_kernwin.msg("Combined: %s:%s\n" % (combined_pattern, combined_mask))
+    ida_kernwin.msg("Length : %d bytes\n" % (len(combined_pattern) // 2))
+    ida_kernwin.msg("="*60 + "\n")
+    
+    # Show success dialog with combined result
+    result_msg = "Pattern generation completed!\n\n"
+    result_msg += "Successfully processed: %d/%d instructions\n\n" % (len(successful_patterns), len(instructions))
+    result_msg += "Combined Pattern:Mask:\n%s:%s\n\n" % (combined_pattern, combined_mask)
+    result_msg += "Pattern length: %d bytes\n\n" % (len(combined_pattern) // 2)
+    
+    if failed_instructions:
+        result_msg += "Note: %d instruction(s) failed - see Output window for details." % len(failed_instructions)
+    else:
+        result_msg += "All instructions processed successfully!"
+    
+    ida_kernwin.info(result_msg)
+    
+    # Show results in a text viewer window
+    PatternGenerationResults.show_results(instruction_results, combined_pattern, combined_mask)
+    
     return True
 
 
 def PLUGIN_ENTRY():
-    """Plugin entry point for IDA Pro"""
+    """Plugin entry point"""
     return IDAMaskPlugin()
