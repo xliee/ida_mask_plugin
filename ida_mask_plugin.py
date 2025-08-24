@@ -14,6 +14,126 @@ import ida_bytes
 import ida_search
 import ida_segment
 import idaapi
+import idc
+
+
+def get_selected_disassembly():
+    """Get raw disassembly from selected lines in IDA by disassembling bytecode without symbols"""
+    try:
+        # Get the current selection
+        selection_start = idc.read_selection_start()
+        selection_end = idc.read_selection_end()
+        
+        if selection_start == idaapi.BADADDR or selection_end == idaapi.BADADDR:
+            return ""
+        
+        # Collect raw assembly by disassembling the actual bytes using Capstone
+        disasm_lines = []
+        current_ea = selection_start
+        
+        # Try to import Capstone for raw disassembly
+        try:
+            import capstone as cs
+            
+            # Initialize Capstone for ARM64
+            md = cs.Cs(cs.CS_ARCH_ARM64, cs.CS_MODE_ARM)
+            md.detail = False  # We don't need detailed analysis
+            
+            while current_ea < selection_end:
+                # Get instruction size
+                insn_size = idc.get_item_size(current_ea)
+                if insn_size == 0:
+                    insn_size = 4  # Default ARM64 instruction size
+                
+                # Read the bytes at this address
+                insn_bytes = ida_bytes.get_bytes(current_ea, insn_size)
+                if insn_bytes:
+                    # Disassemble using Capstone with address 0 to get relative offsets
+                    for insn in md.disasm(insn_bytes, 0, count=1):
+                        # Format instruction - Capstone gives us pure disassembly with relative addressing
+                        asm_line = "%s %s" % (insn.mnemonic.lower(), insn.op_str.lower())
+                        disasm_lines.append(asm_line.strip())
+                        break
+                
+                # Move to next instruction
+                next_ea = idc.next_head(current_ea)
+                if next_ea <= current_ea:
+                    break
+                current_ea = next_ea
+
+            
+        except ImportError:
+            # If Capstone is not available, show a message
+            ida_kernwin.msg("[ida_mask_plugin] Capstone not available. Please install capstone for raw disassembly.\n")
+            ida_kernwin.warning("Capstone engine required for raw bytecode disassembly.\n\nInstall with: pip install capstone")
+            return ""
+        
+        return "\n".join(disasm_lines)
+    
+    except Exception as e:
+        ida_kernwin.msg("[ida_mask_plugin] Error getting selected disassembly: %s\n" % str(e))
+        return ""
+
+
+class IDAMaskUIHooks(idaapi.UI_Hooks):
+    """UI hooks for contextual menu integration"""
+    
+    def __init__(self):
+        idaapi.UI_Hooks.__init__(self)
+    
+    def finish_populating_widget_popup(self, widget, popup):
+        """Add our menu items to the context menu"""
+        # Only add to disassembly views
+        widget_type = ida_kernwin.get_widget_type(widget)
+        if widget_type == ida_kernwin.BWN_DISASM:
+            try:
+                # Add submenu items with proper submenu path like Keypatch does
+                ida_kernwin.attach_action_to_popup(widget, popup, "ida_mask:search_context", "IDA Mask/")
+                ida_kernwin.attach_action_to_popup(widget, popup, "-", "IDA Mask/")
+                ida_kernwin.attach_action_to_popup(widget, popup, "ida_mask:create_context", "IDA Mask/")
+            except:
+                pass
+
+
+class SearchContextActionHandler(ida_kernwin.action_handler_t):
+    """Handler for contextual search action"""
+    
+    def activate(self, ctx):
+        """Activate the search action"""
+        pattern_input = ida_kernwin.ask_str("", 0, "Enter pattern:mask (hex:hex)")
+        if pattern_input:
+            search_pattern_mask(pattern_input)
+        return 1
+
+    def update(self, ctx):
+        """Update action state"""
+        return ida_kernwin.AST_ENABLE_ALWAYS
+
+
+class CreateContextActionHandler(ida_kernwin.action_handler_t):
+    """Handler for contextual create action"""
+    
+    def activate(self, ctx):
+        """Activate the create action"""
+        # Get selected disassembly
+        selected_disasm = get_selected_disassembly()
+        
+        # Use selected disassembly as default or empty string
+        default_text = selected_disasm if selected_disasm else ""
+        
+        # Show helpful message if we have pre-filled content
+        title = "Enter assembly code"
+        if selected_disasm:
+            title += " (pre-filled from selection)"
+        
+        asm_input = ida_kernwin.ask_text(0, default_text, title)
+        if asm_input:
+            create_pattern_from_asm(asm_input)
+        return 1
+
+    def update(self, ctx):
+        """Update action state"""
+        return ida_kernwin.AST_ENABLE_ALWAYS
 
 
 class PatternSearchResults(ida_kernwin.Choose):
@@ -201,12 +321,20 @@ class IDAMaskPlugin(ida_idaapi.plugin_t):
         # Register menu actions
         self.register_actions()
         
+        # Install UI hooks for contextual menu
+        self.ui_hooks = IDAMaskUIHooks()
+        self.ui_hooks.hook()
+        
         ida_kernwin.msg("[ida_mask_plugin] Plugin initialized successfully\n")
         return ida_idaapi.PLUGIN_KEEP
 
     def term(self):
         """Terminate the plugin"""
         ida_kernwin.msg("[ida_mask_plugin] Terminating plugin...\n")
+        
+        # Uninstall UI hooks
+        if hasattr(self, 'ui_hooks'):
+            self.ui_hooks.unhook()
         
         # Unregister actions
         self.unregister_actions()
@@ -242,9 +370,30 @@ class IDAMaskPlugin(ida_idaapi.plugin_t):
             -1
         )
         
+        # Contextual menu actions
+        search_context_action = ida_kernwin.action_desc_t(
+            "ida_mask:search_context",
+            "Search by pattern:mask",
+            SearchContextActionHandler(),
+            "",
+            "Search binary for pattern with mask",
+            -1
+        )
+        
+        create_context_action = ida_kernwin.action_desc_t(
+            "ida_mask:create_context",
+            "Create pattern:mask",
+            CreateContextActionHandler(),
+            "",
+            "Generate pattern:mask from assembly (with selection pre-fill)",
+            -1
+        )
+        
         # Register actions
         ida_kernwin.register_action(search_action)
         ida_kernwin.register_action(create_action)
+        ida_kernwin.register_action(search_context_action)
+        ida_kernwin.register_action(create_context_action)
         
         # Attach to menu
         ida_kernwin.attach_action_to_menu(
@@ -264,6 +413,8 @@ class IDAMaskPlugin(ida_idaapi.plugin_t):
         ida_kernwin.detach_action_from_menu("Edit/IDA Mask/Create", "ida_mask:create")
         ida_kernwin.unregister_action("ida_mask:search")
         ida_kernwin.unregister_action("ida_mask:create")
+        ida_kernwin.unregister_action("ida_mask:search_context")
+        ida_kernwin.unregister_action("ida_mask:create_context")
 
     def list_functions(self):
         """Example function listing - similar to C++ version"""
