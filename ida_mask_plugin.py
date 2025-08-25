@@ -501,29 +501,136 @@ def search_pattern_mask(input_str):
         ida_kernwin.msg("[ida_mask_plugin] Pattern: %s (%d bytes)\n" % (pattern_hex, len(pattern_bytes)))
         ida_kernwin.msg("[ida_mask_plugin] Mask: %s (%d bytes)\n" % (mask_hex, len(mask_bytes)))
         
-        # Search in all segments
-        results = []
+        # Calculate total search space for progress tracking
+        total_bytes = 0
+        searchable_segments = []
         seg_qty = ida_segment.get_segm_qty()
+        
         for seg_idx in range(seg_qty):
             seg = ida_segment.getnseg(seg_idx)
-            if not seg:
-                continue
-            
-            ida_kernwin.msg("[ida_mask_plugin] Searching segment %s (0x%X - 0x%X)\n" % 
-                          (ida_segment.get_segm_name(seg), seg.start_ea, seg.end_ea))
-            
-            # Search within this segment using manual approach
+            if seg and seg.perm & idaapi.SEGPERM_READ:  # Only search readable segments
+                seg_size = seg.end_ea - seg.start_ea
+                if seg_size >= len(pattern_bytes):  # Skip segments smaller than pattern
+                    searchable_segments.append(seg)
+                    total_bytes += seg_size
+        
+        if not searchable_segments:
+            ida_kernwin.warning("No searchable segments found")
+            return False
+        
+        # Show progress dialog
+        ida_kernwin.show_wait_box("Searching for pattern...")
+        
+        try:
+            # Search in all segments with optimized algorithm
+            results = []
+            processed_bytes = 0
             pattern_len = len(pattern_bytes)
-            current_ea = seg.start_ea
             
-            while current_ea <= seg.end_ea - pattern_len:
-                # Check if current position matches the masked pattern
-                if verify_masked_match(current_ea, pattern_bytes, mask_bytes):
-                    results.append(current_ea)
-                    ida_kernwin.msg("[ida_mask_plugin] Found match at 0x%X\n" % current_ea)
+            # Pre-compile mask for faster checking
+            effective_mask_positions = [i for i, mask_byte in enumerate(mask_bytes) if mask_byte != 0]
+            if not effective_mask_positions:
+                ida_kernwin.hide_wait_box()
+                ida_kernwin.warning("Mask is all zeros - no bytes to match")
+                return False
+            
+            for seg in searchable_segments:
+                ida_kernwin.msg("[ida_mask_plugin] Searching segment %s (0x%X - 0x%X)\n" % 
+                              (ida_segment.get_segm_name(seg), seg.start_ea, seg.end_ea))
                 
-                # Move to next byte
-                current_ea += 1
+                # Read entire segment into memory for faster access
+                seg_size = seg.end_ea - seg.start_ea
+                try:
+                    seg_data = ida_bytes.get_bytes(seg.start_ea, seg_size)
+                    if not seg_data:
+                        processed_bytes += seg_size
+                        continue
+                except:
+                    # Fallback to byte-by-byte if segment read fails
+                    seg_data = None
+                
+                if seg_data:
+                    # Fast memory search
+                    search_end = len(seg_data) - pattern_len + 1
+                    last_progress_update = 0
+                    
+                    for offset in range(0, search_end):
+                        # Update progress every 1MB to avoid too frequent updates
+                        if offset - last_progress_update > 1048576:
+                            progress = int(((processed_bytes + offset) * 100) / total_bytes)
+                            progress_msg = "Searching... %d%% (found %d matches)" % (progress, len(results))
+                            
+                            # Check if user wants to cancel
+                            if ida_kernwin.user_cancelled():
+                                ida_kernwin.hide_wait_box()
+                                ida_kernwin.info("Search cancelled by user. Found %d matches so far." % len(results))
+                                if results:
+                                    display_search_results(results, pattern_hex, mask_hex)
+                                return False
+                            
+                            ida_kernwin.replace_wait_box(progress_msg)
+                            last_progress_update = offset
+                        
+                        # Fast masked comparison using only effective mask positions
+                        match = True
+                        for pos in effective_mask_positions:
+                            if (seg_data[offset + pos] & mask_bytes[pos]) != (pattern_bytes[pos] & mask_bytes[pos]):
+                                match = False
+                                break
+                        
+                        if match:
+                            match_addr = seg.start_ea + offset
+                            results.append(match_addr)
+                            ida_kernwin.msg("[ida_mask_plugin] Found match at 0x%X\n" % match_addr)
+                            
+                            # Update progress message to show new match count
+                            progress = int(((processed_bytes + offset) * 100) / total_bytes)
+                            progress_msg = "Searching... %d%% (found %d matches)" % (progress, len(results))
+                            ida_kernwin.replace_wait_box(progress_msg)
+                else:
+                    # Fallback to slower address-by-address search
+                    current_ea = seg.start_ea
+                    last_progress_update = 0
+                    
+                    while current_ea <= seg.end_ea - pattern_len:
+                        # Update progress every 64KB
+                        bytes_in_seg = current_ea - seg.start_ea
+                        if bytes_in_seg - last_progress_update > 65536:
+                            progress = int(((processed_bytes + bytes_in_seg) * 100) / total_bytes)
+                            progress_msg = "Searching... %d%% (found %d matches)" % (progress, len(results))
+                            
+                            # Check if user wants to cancel
+                            if ida_kernwin.user_cancelled():
+                                ida_kernwin.hide_wait_box()
+                                ida_kernwin.info("Search cancelled by user. Found %d matches so far." % len(results))
+                                if results:
+                                    display_search_results(results, pattern_hex, mask_hex)
+                                return False
+                            
+                            ida_kernwin.replace_wait_box(progress_msg)
+                            last_progress_update = bytes_in_seg
+                        
+                        # Check if current position matches the masked pattern
+                        if verify_masked_match_fast(current_ea, pattern_bytes, mask_bytes, effective_mask_positions):
+                            results.append(current_ea)
+                            ida_kernwin.msg("[ida_mask_plugin] Found match at 0x%X\n" % current_ea)
+                            
+                            # Update progress message to show new match count
+                            progress = int(((processed_bytes + bytes_in_seg) * 100) / total_bytes)
+                            progress_msg = "Searching... %d%% (found %d matches)" % (progress, len(results))
+                            ida_kernwin.replace_wait_box(progress_msg)
+                        
+                        # Move to next byte
+                        current_ea += 1
+                
+                processed_bytes += seg_size
+            
+            # Hide progress dialog
+            ida_kernwin.hide_wait_box()
+            
+        except Exception as search_error:
+            ida_kernwin.hide_wait_box()
+            raise search_error
         
         # Display results
         if results:
@@ -561,6 +668,38 @@ def verify_masked_match(address, pattern_bytes, mask_bytes):
         for i in range(len(pattern_bytes)):
             masked_actual = actual_bytes[i] & mask_bytes[i]
             masked_pattern = pattern_bytes[i] & mask_bytes[i]
+            
+            if masked_actual != masked_pattern:
+                return False
+        
+        return True
+    except:
+        return False
+
+
+def verify_masked_match_fast(address, pattern_bytes, mask_bytes, effective_mask_positions):
+    """
+    Optimized version that only checks positions where mask is not zero
+    
+    Args:
+        address: Address to check
+        pattern_bytes: Expected pattern bytes
+        mask_bytes: Mask bytes (0xFF = must match, 0x00 = ignore)
+        effective_mask_positions: List of positions where mask_bytes[i] != 0
+    
+    Returns:
+        bool: True if match, False otherwise
+    """
+    try:
+        # Read bytes from memory
+        actual_bytes = ida_bytes.get_bytes(address, len(pattern_bytes))
+        if not actual_bytes or len(actual_bytes) != len(pattern_bytes):
+            return False
+        
+        # Check only effective mask positions for speed
+        for pos in effective_mask_positions:
+            masked_actual = actual_bytes[pos] & mask_bytes[pos]
+            masked_pattern = pattern_bytes[pos] & mask_bytes[pos]
             
             if masked_actual != masked_pattern:
                 return False
