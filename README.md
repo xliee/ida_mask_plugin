@@ -78,15 +78,15 @@ If IDA Pro uses a different Python interpreter, install dependencies directly:
 For development or custom builds, use the PyO3 wrapper:
 
 ```bash
-git clone https://github.com/xliee/arm64-mask-gen-py-wrapper
-cd arm64-mask-gen-py-wrapper
+git clone https://github.com/xliee/arm64-mask-gen-py
+cd arm64-mask-gen-py
 maturin develop --release
 ```
 
 ## Related Projects
 
 - **Core Library**: [arm64-mask-gen](https://github.com/xliee/arm64-mask-gen) - Rust-based pattern generation engine
-- **Python Wrapper**: [arm64-mask-gen-py-wrapper](https://github.com/xliee/arm64-mask-gen-py-wrapper) - PyO3 bindings
+- **Python Wrapper**: [arm64-mask-gen-py](https://github.com/xliee/arm64-mask-gen-py) - PyO3 bindings
 - **PyPI Package**: [arm64-mask-gen-py](https://pypi.org/project/arm64-mask-gen-py/) - Published Python wheel
 
 ## 📝 License
