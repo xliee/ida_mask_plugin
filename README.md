@@ -1,50 +1,95 @@
 # IDA Mask Plugin
 
-Python plugin for IDA Pro that provides pattern search and generation functionality.
+A professional IDA Pro plugin for binary pattern analysis and generation, featuring ARM64 assembly-to-pattern conversion capabilities.
 
 ## Features
 
-- **Search by pattern:mask**: Search binary for byte patterns with wildcards
-- **Create pattern:mask**: Generate patterns from assembly code snippets
+### **Search by Pattern:Mask**
+Search through loaded binaries using byte patterns with wildcard support for flexible binary analysis.
 
-## Structure
+### **Create Pattern:Mask**  
+Generate precise byte patterns and masks from ARM64 assembly templates, powered by the `arm64-mask-gen` engine.
 
-- `ida_mask_plugin.py`: Main Python plugin implementation
+## 📦 Installation
 
-## Installation
-
-### Method 1: User Plugins Directory (Recommended)
-Copy the plugin to your user plugins directory:
+### Step 1: Install the Plugin
+Copy the plugin file to your IDA Pro plugins directory:
 
 ```bash
 cp ida_mask_plugin.py ~/.idapro/plugins/
 ```
 
-## Usage
-
-1. Start IDA Pro and load a binary
-2. Navigate to `Edit -> Plugins -> IDA Mask Plugin`
-3. Choose either:
-   - **Search by pattern:mask**: Enter hex pattern and mask (e.g., `48894c24?8:ffffffff?f`)
-   - **Create pattern:mask**: Enter assembly code to generate a pattern
-
-Note: The `Create pattern:mask` action uses an external Python extension [`arm64_mask_gen_py`](https://github.com/xliee/arm64-mask-gen-py-wrapper) (PyO3 wrapper around the [`arm64-mask-gen`](https://github.com/xliee/arm64-mask-gen) Rust crate). To enable pattern generation from assembly you must build and install the wrapper:
-
-1. Build the wrapper for the Python interpreter used by IDA:
+### Step 2: Install Dependencies
+Install the required Python packages using the provided requirements file:
 
 ```bash
-   maturin develop --release
+pip install -r requirements.txt
 ```
 
-2. Restart IDA so the extension can be imported by the plugin.
+Or install individually:
+```bash
+pip install arm64-mask-gen-py capstone
+```
 
-If the wrapper is not installed, the plugin will show the assembly input and a warning.
+> **Note**: For IDA Pro's embedded Python, you may need to use the specific Python interpreter that IDA uses.
+
+## 🚀 Usage
+
+### Accessing the Plugin
+1. Launch IDA Pro and load your target binary
+2. Navigate to **Edit → Plugins → IDA Mask Plugin**
+3. Select your desired operation
+
+### Pattern Search
+Enter a hex pattern with mask to search through the binary:
+- **Pattern**: `48 89 4C 24 08`
+- **Mask**: `FF FF FF FF FF` (exact match) or `FF FF FF FF 00` (wildcard last byte)
+
+### Pattern Generation
+Input ARM64 assembly templates to generate corresponding patterns:
+
+**Example:**
+```
+Template : MOV X3, #?
+Pattern  : 030080d2
+Mask     : 1f00e0ff
+COMBINED : 030080d2:1f00e0ff
+```
+
 
 ## Requirements
 
-- IDA Pro (tested with version 9.0+)
-- Python 3.x (included with IDA Pro)
+- **IDA Pro** 9.0+ (tested)
+- **Python** 3.7+ (bundled with IDA Pro)
+- **Dependencies** (auto-installed via requirements.txt):
+  - `arm64-mask-gen-py`: ARM64 pattern generation engine
+  - `capstone`: Disassembly framework
 
-## License
+## Advanced Configuration
+
+### Custom Python Environment
+If IDA Pro uses a different Python interpreter, install dependencies directly:
+
+```bash
+/path/to/ida/python -m pip install arm64-mask-gen-py capstone
+```
+
+### Building from Source
+For development or custom builds, use the PyO3 wrapper:
+
+```bash
+git clone https://github.com/xliee/arm64-mask-gen-py-wrapper
+cd arm64-mask-gen-py-wrapper
+maturin develop --release
+```
+
+## Related Projects
+
+- **Core Library**: [arm64-mask-gen](https://github.com/xliee/arm64-mask-gen) - Rust-based pattern generation engine
+- **Python Wrapper**: [arm64-mask-gen-py-wrapper](https://github.com/xliee/arm64-mask-gen-py-wrapper) - PyO3 bindings
+- **PyPI Package**: [arm64-mask-gen-py](https://pypi.org/project/arm64-mask-gen-py/) - Published Python wheel
+
+## 📝 License
 
 Licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
